@@ -1,0 +1,89 @@
+1. ChatState
+
+1.1
+private final Lock lock = new ReentrantLock();
+private final Condition notEmpty = lock.newCondition(); 
+
+Use a lock to implement the syncronization to protect the data of ChatState. 
+Use a condition of that lock to implement the notification to recentMessage().
+
+1.2
+addMessage()
+(1) lock
+(2) add new item
+(3) notify all waiting recentMessages thread with "notEmpty" signal.
+(4) unlock
+
+recentMessages()
+(5) lock
+(6) if the requested message set is not empty, return it. 
+(7) await (i.e., unlock, then wait, then lock) with 15s timeout for "notEmpty" signal.
+(8) if addMessage is called, return the requested message
+(9) unlock
+
+The brief proof of correctness: 
+Claim 1: The reading lines (6),(8) and the writing line (2) are protected by a lock.
+So the reading thread and the writing thread will not interfere when the data in ChatState is reading or writing.
+
+Claim 2: If recentMessages does not get any requested message at line (6). 
+At the line (7), it waits for the signal "notEmpty" emited at line (3) with a timeout.
+If time runs out, return empty set. Otherwise, once addMessage is called, all waiting recentMessages will be notified.
+Therefore, the recentMessages will be unblocked eventually and return the new added message if the message ID is larger than requested ID.
+
+2. ChatServer 
+
+2.1 Use ThreadPool to create a thread pool to manage the workers. One worker handles one http request.
+
+ThreadPool contains a queue of tasks. Once a http request comes in, we enqueue that task into the queue.
+Once we enqueue a new task, we notify one worker to work. 
+ThreadPool contains 8 workers (threads). They are waiting for new tasks' coming into queue. By "synchronized(taskQueue)", the only one worker at the same can pull a task out of the queue. 
+Therefore, the correctness of ThreadPool holds. 
+
+2.2 In getState(), use "synchronized(stateByName)" to protect stateByName in order to prevent that two same rooms are created at the same time by two threads.
+
+3. Extra Credit
+
+3.1 We add a ChatState allRoom to represent "all" room in ChatServer, which is initialized with ChatServer object.
+    private final ChatState allRoom = new ChatState("all");
+
+3.2 Calling recentMessages() for allRoom is the same way as the normal room.
+3.3 Calling addMessage() for the normal room: we first send the message to the normal room, and then send the message to allRoom.
+Notice to protect the operations by a lock of allRoom as following.
+
+synchronized (allRoom) {
+	getState(room).addMessage(msg);
+	allRoom.addMessage(msg);
+}
+
+Otherwise, we can consider the counterexample below. 
+
+Thread 1
+(1) normalRoom.addMessage("A")
+(2) allRoom.addMessage("A")
+
+Thread 2
+(3) normalRoom.addMessage("B")
+(4) allRoom.addMessage("B")
+
+The execute order could be (1)(3)(4)(2), which leads the inconsistent message order of allRoom ("AB") and normalRoom ("BA").
+
+3.4 Calling addMessage() for the "all" room: we first send the message to all the normal rooms, and then send the message to allRoom. Based on the same reason, notice to protect the operations by a lock of allRoom as following. 
+
+synchronized (allRoom) {
+    synchronized (stateByName) { 
+        for (ChatState state : stateByName.values()) {
+           state.addMessage(msg);
+        }
+        allRoom.addMessage(msg);
+    }
+}
+
+Of course, when we read stateByName, we need to protect it by "synchronized(stateByName)".
+
+4. Discussion: Drawback of this implementation of ThreadPool
+In my implementation, the recentMessages() await for new incoming message's "notEmpty" signal. 
+In this implementation of ThreadPool, this server could not support more than 8 browser sessions without busy-waiting. If there are more than 8 browser sessions, there are more than 8 recentMessages() threads waiting, and the response of all sessions will be very very slow (it will wait for 15s timeout for releasing a thread pool slot to process new http request).
+The thread pool only has capacity 8. ThreadPool does not switch out the waiting thread until the thread finishes. The scheduling of this Java thread pool is quite different from the context swtich of OS process scheduler, which will switch out the process periodically to prevent busy-waiting case.
+
+Actually, in node.js, an async-model programming language, no threads will be blocked and waiting using callback. I do not know if there are an implementation of Java to do this kind of async job, or what is the easies way to apply async idea into this programming assignment.
+
